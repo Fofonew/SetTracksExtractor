@@ -80,14 +80,41 @@ def track_key(title: str, artist: str) -> Tuple[str, str]:
 
 
 # ──────────────────────────────────────────────────
-#  Progress callback type
+#  Progress callback
 # ──────────────────────────────────────────────────
 
-# on_progress(step, pct, message)  — step: str, pct: 0-100, message: str
 ProgressCallback = Callable[[str, int, str], None]
 
 def _noop_progress(step: str, pct: int, msg: str) -> None:
     pass
+
+
+# ──────────────────────────────────────────────────
+#  Async subprocess helper
+# ──────────────────────────────────────────────────
+
+async def run_cmd(*args: str, check: bool = True, capture: bool = False) -> Optional[str]:
+    """Lance un subprocess sans bloquer la boucle asyncio."""
+    if capture:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"Commande echouee: {' '.join(args)}\n{stderr.decode()}")
+        return stdout.decode().strip()
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"Commande echouee: {' '.join(args)}")
+        return None
 
 
 # ──────────────────────────────────────────────────
@@ -100,7 +127,6 @@ def cleanup_previous_files(work_dir: str, segments_dir: str) -> None:
         os.remove(os.path.join(work_dir, f))
     if mp3_files:
         log.info("Nettoyage : %d ancien(s) MP3 supprime(s)", len(mp3_files))
-
     if os.path.isdir(segments_dir):
         count = 0
         for f in os.listdir(segments_dir):
@@ -111,17 +137,24 @@ def cleanup_previous_files(work_dir: str, segments_dir: str) -> None:
 
 
 # ──────────────────────────────────────────────────
-#  Telechargement
+#  Telechargement (async)
 # ──────────────────────────────────────────────────
 
-def download_soundcloud(url: str, work_dir: str) -> str:
+async def download_soundcloud(url: str, work_dir: str) -> str:
     log.info("=== ETAPE 1/4 : Telechargement ===")
     log.info("URL : %s", url)
     before = {f for f in os.listdir(work_dir) if f.endswith(".mp3")}
-    cmd = ["scdl", "-l", url, "--onlymp3", "--path", work_dir]
-    subprocess.run(cmd, check=True)
-    after = {f for f in os.listdir(work_dir) if f.endswith(".mp3")}
 
+    proc = await asyncio.create_subprocess_exec(
+        "scdl", "-l", url, "--onlymp3", "--path", work_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("Echec du telechargement SoundCloud")
+
+    after = {f for f in os.listdir(work_dir) if f.endswith(".mp3")}
     new_files = after - before
     if new_files:
         latest = max(new_files, key=lambda f: os.path.getmtime(os.path.join(work_dir, f)))
@@ -136,35 +169,34 @@ def download_soundcloud(url: str, work_dir: str) -> str:
 
 
 # ──────────────────────────────────────────────────
-#  Decoupage
+#  Decoupage (async)
 # ──────────────────────────────────────────────────
 
-def get_audio_duration(filename: str) -> float:
-    cmd = [
+async def get_audio_duration(filename: str) -> float:
+    output = await run_cmd(
         "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", filename,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return float(result.stdout.strip())
+        capture=True,
+    )
+    return float(output)
 
 
-def cut_segments(filename: str, segments_dir: str) -> None:
+async def cut_segments(filename: str, segments_dir: str) -> None:
     log.info("=== ETAPE 2/4 : Decoupage ===")
-    duration = get_audio_duration(filename)
+    duration = await get_audio_duration(filename)
     log.info("Duree totale : %s", seconds_to_hhmmss(int(duration)))
 
     os.makedirs(segments_dir, exist_ok=True)
     for f in os.listdir(segments_dir):
         os.remove(os.path.join(segments_dir, f))
 
-    cmd = [
+    await run_cmd(
         "ffmpeg", "-y", "-i", filename,
         "-f", "segment",
         "-segment_time", str(SEGMENT_DURATION),
         "-c:a", "libmp3lame", "-q:a", "2",
         os.path.join(segments_dir, "part_%06d" + AUDIO_EXT),
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    )
 
     total = len([f for f in os.listdir(segments_dir) if f.endswith(AUDIO_EXT)])
     log.info("Segments crees : %d", total)
@@ -358,13 +390,18 @@ async def process_segment(
         candidates.append(res)
 
     if audd_token:
-        res = normalize_audd(file_name, audd_recognize(path, audd_token))
+        loop = asyncio.get_event_loop()
+        audd_payload = await loop.run_in_executor(None, audd_recognize, path, audd_token)
+        res = normalize_audd(file_name, audd_payload)
         if res:
             candidates.append(res)
 
     if acr_config:
-        res = normalize_acrcloud(file_name, acrcloud_recognize(
-            path, acr_config["host"], acr_config["access_key"], acr_config["access_secret"]))
+        loop = asyncio.get_event_loop()
+        acr_payload = await loop.run_in_executor(
+            None, acrcloud_recognize,
+            path, acr_config["host"], acr_config["access_key"], acr_config["access_secret"])
+        res = normalize_acrcloud(file_name, acr_payload)
         if res:
             candidates.append(res)
 
@@ -447,29 +484,21 @@ async def run_analysis(
     work_dir: str,
     on_progress: ProgressCallback = _noop_progress,
 ) -> Tuple[List[Dict[str, Any]], str]:
-    """
-    Lance l'analyse complete. Retourne (tracklist, csv_path).
-    on_progress(step, pct, message) est appele a chaque etape.
-    """
     ensure_tools()
     segments_dir = os.path.join(work_dir, "segments")
     csv_path = os.path.join(work_dir, "tracklist.csv")
 
-    # Nettoyage
     on_progress("cleanup", 0, "Nettoyage des fichiers precedents...")
     cleanup_previous_files(work_dir, segments_dir)
 
-    # Telechargement
     on_progress("download", 5, "Telechargement depuis SoundCloud...")
-    mp3file = download_soundcloud(url, work_dir)
+    mp3file = await download_soundcloud(url, work_dir)
     on_progress("download", 15, "Telechargement termine.")
 
-    # Decoupage
     on_progress("cutting", 18, "Decoupage en segments...")
-    cut_segments(mp3file, segments_dir)
+    await cut_segments(mp3file, segments_dir)
     on_progress("cutting", 25, "Decoupage termine.")
 
-    # Preparation
     all_segs = list_all_segments(segments_dir)
     selected = select_sparse_segments(all_segs)
     if not selected:
@@ -516,7 +545,6 @@ async def run_analysis(
                     f"Segment {done_count}/{total} analyse"
                     + (f" — {best['artist']} - {best['title']}" if best else ""))
 
-    # Dedup + export
     on_progress("finalize", 92, "Deduplication...")
     tracklist = deduplicate_tracklist(all_results)
     save_csv(tracklist, csv_path)
