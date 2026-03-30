@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -14,7 +14,6 @@ from analyse_djset import run_analysis, FIELDS
 
 app = FastAPI(title="SetTracksExtractor")
 
-# Stockage des jobs en memoire
 jobs: dict = {}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,30 +29,35 @@ async def index():
 
 @app.get("/api/analyze")
 async def analyze(url: str) -> StreamingResponse:
-    """Lance l'analyse et streame la progression via SSE."""
     job_id = str(uuid.uuid4())[:8]
     work_dir = tempfile.mkdtemp(prefix=f"ste_{job_id}_")
+    loop = asyncio.get_event_loop()
 
     async def event_stream() -> AsyncGenerator[str, None]:
         queue: asyncio.Queue = asyncio.Queue()
 
         def on_progress(step: str, pct: int, msg: str) -> None:
-            queue.put_nowait({"type": "progress", "step": step, "pct": pct, "message": msg})
+            # thread-safe: peut etre appele depuis sync ou async
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {"type": "progress", "step": step, "pct": pct, "message": msg},
+            )
 
         async def run():
             try:
                 tracklist, csv_path = await run_analysis(url, work_dir, on_progress=on_progress)
-                rows = []
-                for r in tracklist:
-                    rows.append({k: r.get(k) for k in FIELDS})
+                rows = [{k: r.get(k) for k in FIELDS} for r in tracklist]
                 queue.put_nowait({"type": "result", "job_id": job_id, "tracks": rows})
                 jobs[job_id] = {"csv_path": csv_path, "work_dir": work_dir}
             except Exception as e:
                 queue.put_nowait({"type": "error", "message": str(e)})
             finally:
-                queue.put_nowait(None)  # signal de fin
+                queue.put_nowait(None)
 
         task = asyncio.create_task(run())
+
+        # Padding initial pour forcer le flush du buffer navigateur
+        yield ": padding\n\n"
 
         while True:
             item = await queue.get()
@@ -63,8 +67,15 @@ async def analyze(url: str) -> StreamingResponse:
 
         await task
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/download/{job_id}")
