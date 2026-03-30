@@ -1,3 +1,4 @@
 .env
 .claude
-segment/*
+segments/*
+.idea
