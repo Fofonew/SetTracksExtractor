@@ -10,6 +10,7 @@ import hashlib
 import base64
 import hmac
 import uuid
+import urllib.parse
 from datetime import timedelta
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from difflib import SequenceMatcher
@@ -22,10 +23,13 @@ load_dotenv()
 
 # ===================== CONFIG =====================
 SEGMENT_DURATION = 30
-SKIP_INTERVAL = 60
-MAX_CONCURRENCY = 3
+SKIP_INTERVAL = 120          # toutes les 2 min (au lieu de 1) -> 2x moins de requetes
+MAX_CONCURRENCY = 2          # 2 en parallele max (plus doux pour Shazam)
+SHAZAM_TIMEOUT = 20          # timeout par requete Shazam en secondes
+SHAZAM_COOLDOWN = 1.0        # pause entre chaque segment pour eviter le rate-limit
 AUDIO_EXT = ".mp3"
 SIMILARITY_THRESHOLD = 0.75
+DISCOGS_USER_AGENT = "SetTracksExtractor/1.0"
 # ==================================================
 
 logging.basicConfig(
@@ -94,12 +98,9 @@ def _noop_progress(step: str, pct: int, msg: str) -> None:
 # ──────────────────────────────────────────────────
 
 async def run_cmd(*args: str, check: bool = True, capture: bool = False) -> Optional[str]:
-    """Lance un subprocess sans bloquer la boucle asyncio."""
     if capture:
         proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         if check and proc.returncode != 0:
@@ -107,9 +108,7 @@ async def run_cmd(*args: str, check: bool = True, capture: bool = False) -> Opti
         return stdout.decode().strip()
     else:
         proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         await proc.wait()
         if check and proc.returncode != 0:
@@ -141,14 +140,13 @@ def cleanup_previous_files(work_dir: str, segments_dir: str) -> None:
 # ──────────────────────────────────────────────────
 
 async def download_soundcloud(url: str, work_dir: str) -> str:
-    log.info("=== ETAPE 1/4 : Telechargement ===")
+    log.info("=== ETAPE 1/5 : Telechargement ===")
     log.info("URL : %s", url)
     before = {f for f in os.listdir(work_dir) if f.endswith(".mp3")}
 
     proc = await asyncio.create_subprocess_exec(
         "scdl", "-l", url, "--onlymp3", "--path", work_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     await proc.wait()
     if proc.returncode != 0:
@@ -169,7 +167,7 @@ async def download_soundcloud(url: str, work_dir: str) -> str:
 
 
 # ──────────────────────────────────────────────────
-#  Decoupage (async)
+#  Decoupage (async) avec progress
 # ──────────────────────────────────────────────────
 
 async def get_audio_duration(filename: str) -> float:
@@ -181,25 +179,58 @@ async def get_audio_duration(filename: str) -> float:
     return float(output)
 
 
-async def cut_segments(filename: str, segments_dir: str) -> None:
-    log.info("=== ETAPE 2/4 : Decoupage ===")
+async def cut_segments(filename: str, segments_dir: str,
+                       on_progress: ProgressCallback = _noop_progress) -> float:
+    log.info("=== ETAPE 2/5 : Decoupage ===")
     duration = await get_audio_duration(filename)
     log.info("Duree totale : %s", seconds_to_hhmmss(int(duration)))
+    expected = int(duration / SEGMENT_DURATION) + 1
+    on_progress("cutting", 18, f"Decoupage de {seconds_to_hhmmss(int(duration))} "
+                f"en ~{expected} segments...")
 
     os.makedirs(segments_dir, exist_ok=True)
     for f in os.listdir(segments_dir):
         os.remove(os.path.join(segments_dir, f))
 
-    await run_cmd(
+    # Lance ffmpeg avec stderr pour suivre la progression
+    proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", filename,
         "-f", "segment",
         "-segment_time", str(SEGMENT_DURATION),
         "-c:a", "libmp3lame", "-q:a", "2",
         os.path.join(segments_dir, "part_%06d" + AUDIO_EXT),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
+
+    # Lit stderr en temps reel pour envoyer la progression
+    last_pct = 18
+    while True:
+        line = await proc.stderr.readline()
+        if not line:
+            break
+        text = line.decode(errors="ignore")
+        if "time=" in text:
+            try:
+                t = text.split("time=")[1].split()[0]
+                parts = t.split(":")
+                secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                pct = 18 + int((secs / duration) * 7)  # 18-25%
+                if pct > last_pct:
+                    last_pct = pct
+                    on_progress("cutting", pct,
+                                f"Decoupage... {seconds_to_hhmmss(int(secs))} / "
+                                f"{seconds_to_hhmmss(int(duration))}")
+            except (IndexError, ValueError):
+                pass
+
+    await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("ffmpeg echoue")
 
     total = len([f for f in os.listdir(segments_dir) if f.endswith(AUDIO_EXT)])
     log.info("Segments crees : %d", total)
+    return duration
 
 
 def list_all_segments(segments_dir: str) -> List[str]:
@@ -216,69 +247,24 @@ def select_sparse_segments(files: List[str]) -> List[str]:
 
 
 # ──────────────────────────────────────────────────
-#  Services de reconnaissance
+#  Shazam avec timeout
 # ──────────────────────────────────────────────────
 
-async def shazam_recognize(shazam: Shazam, path: str, retries: int = 3) -> Optional[Dict]:
+async def shazam_recognize(shazam: Shazam, path: str, retries: int = 2) -> Optional[Dict]:
     for attempt in range(retries):
         try:
-            return await shazam.recognize(path)
+            result = await asyncio.wait_for(
+                shazam.recognize(path),
+                timeout=SHAZAM_TIMEOUT,
+            )
+            return result
+        except asyncio.TimeoutError:
+            log.warning("Shazam timeout (%ds) tentative %d/%d",
+                        SHAZAM_TIMEOUT, attempt + 1, retries)
         except Exception as e:
             log.warning("Shazam %d/%d : %s", attempt + 1, retries, e)
-            if attempt < retries - 1:
-                await asyncio.sleep(1.5 ** attempt)
-    return None
-
-
-def audd_recognize(path: str, token: str, retries: int = 3) -> Optional[Dict]:
-    for attempt in range(retries):
-        try:
-            with open(path, "rb") as data:
-                r = requests.post(
-                    "https://api.audd.io/",
-                    data={"api_token": token, "return": "apple_music,spotify"},
-                    files={"file": data}, timeout=60,
-                )
-            if r.status_code == 429:
-                time.sleep(1.5 ** attempt)
-                continue
-            return r.json()
-        except Exception as e:
-            log.warning("AudD %d/%d : %s", attempt + 1, retries, e)
-            if attempt < retries - 1:
-                time.sleep(1.5 ** attempt)
-    return None
-
-
-def acrcloud_recognize(path: str, host: str, access_key: str, access_secret: str,
-                       retries: int = 3) -> Optional[Dict]:
-    for attempt in range(retries):
-        try:
-            with open(path, "rb") as f:
-                sample = f.read()
-            timestamp = str(int(time.time()))
-            string_to_sign = "POST\n/v1/identify\n" + access_key + "\naudio\n1\n" + timestamp
-            sign = base64.b64encode(
-                hmac.new(access_secret.encode("ascii"),
-                         string_to_sign.encode("ascii"),
-                         hashlib.sha1).digest()
-            ).decode("ascii")
-            r = requests.post(
-                f"https://{host}/v1/identify",
-                data={"access_key": access_key, "sample_bytes": len(sample),
-                      "timestamp": timestamp, "signature": sign,
-                      "data_type": "audio", "signature_version": "1"},
-                files={"sample": ("segment.mp3", sample, "audio/mpeg")},
-                timeout=30,
-            )
-            result = r.json()
-            if result.get("status", {}).get("code") == 0:
-                return result
-            return None
-        except Exception as e:
-            log.warning("ACRCloud %d/%d : %s", attempt + 1, retries, e)
-            if attempt < retries - 1:
-                time.sleep(1.5 ** attempt)
+        if attempt < retries - 1:
+            await asyncio.sleep(2)
     return None
 
 
@@ -319,93 +305,116 @@ def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[s
     }
 
 
-def normalize_audd(file_name: str, payload: Optional[Dict]) -> Optional[Dict[str, Any]]:
-    if not payload:
-        return None
-    res = payload.get("result")
-    if not res:
-        return None
-    title, artist = res.get("title"), res.get("artist")
-    if not title or not artist:
-        return None
-    idx = segment_index_from_name(file_name)
-    offset = idx * SEGMENT_DURATION
-    return {
-        "source": "AudD", "title": title, "artist": artist,
-        "album": res.get("album"), "label": res.get("label"),
-        "isrc": res.get("isrc"),
-        "spotify": safe_get(res, ["spotify", "external_urls", "spotify"]),
-        "apple": safe_get(res, ["apple_music", "url"]),
-        "confidence": res.get("score") or res.get("confidence"),
-        "file_segment": file_name,
-        "time_offset_seconds": offset,
-        "time_offset_hhmmss": seconds_to_hhmmss(offset),
-    }
-
-
-def normalize_acrcloud(file_name: str, payload: Optional[Dict]) -> Optional[Dict[str, Any]]:
-    if not payload:
-        return None
-    music = safe_get(payload, ["metadata", "music"])
-    if not music:
-        return None
-    track = music[0]
-    title = track.get("title")
-    artist = ", ".join(a.get("name", "") for a in track.get("artists", []))
-    if not title or not artist:
-        return None
-    idx = segment_index_from_name(file_name)
-    offset = idx * SEGMENT_DURATION
-    spotify_id = safe_get(track, ["external_metadata", "spotify", "track", "id"])
-    spotify = f"https://open.spotify.com/track/{spotify_id}" if spotify_id else None
-    return {
-        "source": "ACRCloud", "title": title, "artist": artist,
-        "album": safe_get(track, ["album", "name"]),
-        "label": track.get("label"),
-        "isrc": safe_get(track, ["external_ids", "isrc"]),
-        "spotify": spotify, "apple": None,
-        "confidence": track.get("score"),
-        "file_segment": file_name,
-        "time_offset_seconds": offset,
-        "time_offset_hhmmss": seconds_to_hhmmss(offset),
-    }
-
-
 # ──────────────────────────────────────────────────
-#  Traitement d'un segment
+#  Traitement sequentiel avec cooldown
 # ──────────────────────────────────────────────────
 
-async def process_segment(
-    file_name: str, segments_dir: str,
-    shazam: Shazam, sem: asyncio.Semaphore,
-    audd_token: Optional[str], acr_config: Optional[Dict[str, str]],
+async def process_segments_sequential(
+    selected: List[str], segments_dir: str,
+    on_progress: ProgressCallback,
 ) -> List[Dict[str, Any]]:
-    path = os.path.join(segments_dir, file_name)
-    candidates: List[Dict[str, Any]] = []
+    """Traite les segments un par un avec cooldown pour eviter le rate-limit."""
+    shazam = Shazam()
+    all_results: List[Dict[str, Any]] = []
+    total = len(selected)
 
-    async with sem:
-        shazam_payload = await shazam_recognize(shazam, path)
-    res = normalize_shazam(file_name, shazam_payload)
-    if res:
-        candidates.append(res)
+    for i, file_name in enumerate(selected):
+        path = os.path.join(segments_dir, file_name)
+        idx = segment_index_from_name(file_name)
+        offset = idx * SEGMENT_DURATION
+        ts = seconds_to_hhmmss(offset)
 
-    if audd_token:
-        loop = asyncio.get_event_loop()
-        audd_payload = await loop.run_in_executor(None, audd_recognize, path, audd_token)
-        res = normalize_audd(file_name, audd_payload)
+        on_progress("recognition", 25 + int((i / total) * 55),
+                    f"Analyse segment {i + 1}/{total} (position {ts})...")
+        log.info("[%d/%d] Segment %s (position %s)", i + 1, total, file_name, ts)
+
+        result = await shazam_recognize(shazam, path)
+        res = normalize_shazam(file_name, result)
+
         if res:
-            candidates.append(res)
+            log.info("  -> %s - %s", res["artist"], res["title"])
+            all_results.append(res)
+        else:
+            log.info("  -> pas de match")
 
-    if acr_config:
-        loop = asyncio.get_event_loop()
-        acr_payload = await loop.run_in_executor(
-            None, acrcloud_recognize,
-            path, acr_config["host"], acr_config["access_key"], acr_config["access_secret"])
-        res = normalize_acrcloud(file_name, acr_payload)
-        if res:
-            candidates.append(res)
+        # Cooldown entre chaque requete
+        if i < total - 1:
+            await asyncio.sleep(SHAZAM_COOLDOWN)
 
-    return candidates
+    return all_results
+
+
+# ──────────────────────────────────────────────────
+#  Discogs + YouTube enrichment
+# ──────────────────────────────────────────────────
+
+def search_discogs_vinyl(artist: str, title: str) -> Optional[str]:
+    """Cherche un vinyl sur Discogs. Retourne l'URL si trouve."""
+    try:
+        query = f"{artist} {title}"
+        r = requests.get(
+            "https://api.discogs.com/database/search",
+            params={"q": query, "type": "release", "format": "Vinyl", "per_page": 1},
+            headers={"User-Agent": DISCOGS_USER_AGENT},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            results = data.get("results", [])
+            if results:
+                return results[0].get("uri", "").replace("//api.discogs.com", "//www.discogs.com")
+        return None
+    except Exception as e:
+        log.debug("Discogs erreur pour %s - %s: %s", artist, title, e)
+        return None
+
+
+def youtube_search_url(artist: str, title: str) -> str:
+    """Construit un lien de recherche YouTube."""
+    query = f"{artist} {title}"
+    return f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
+
+
+async def enrich_tracklist(
+    tracklist: List[Dict[str, Any]],
+    on_progress: ProgressCallback,
+) -> List[Dict[str, Any]]:
+    """Enrichit chaque track avec Discogs (vinyl) et YouTube."""
+    total = len(tracklist)
+    if not total:
+        return tracklist
+
+    on_progress("enrichment", 82, f"Recherche Discogs/YouTube pour {total} tracks...")
+    log.info("=== ETAPE 4/5 : Enrichissement Discogs + YouTube ===")
+
+    loop = asyncio.get_event_loop()
+
+    for i, track in enumerate(tracklist):
+        artist = track.get("artist", "")
+        title = track.get("title", "")
+        log.info("  [%d/%d] %s - %s", i + 1, total, artist, title)
+
+        # YouTube (instantane, juste un lien)
+        track["youtube"] = youtube_search_url(artist, title)
+
+        # Discogs (requete API, dans un executor pour ne pas bloquer)
+        discogs_url = await loop.run_in_executor(None, search_discogs_vinyl, artist, title)
+        track["discogs_vinyl"] = discogs_url
+        if discogs_url:
+            log.info("    Vinyl trouve : %s", discogs_url)
+        else:
+            log.info("    Pas de vinyl trouve")
+
+        pct = 82 + int(((i + 1) / total) * 8)  # 82-90%
+        on_progress("enrichment", pct,
+                    f"Enrichissement {i + 1}/{total} — {artist} - {title}"
+                    + (" (vinyl!)" if discogs_url else ""))
+
+        # Respect rate-limit Discogs (25 req/min)
+        if i < total - 1:
+            await asyncio.sleep(1.5)
+
+    return tracklist
 
 
 # ──────────────────────────────────────────────────
@@ -461,8 +470,8 @@ def deduplicate_tracklist(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 FIELDS = [
     "time_offset_hhmmss", "time_offset_seconds", "title", "artist",
-    "album", "label", "isrc", "spotify", "apple", "source",
-    "file_segment", "confidence",
+    "album", "label", "isrc", "spotify", "apple", "youtube",
+    "discogs_vinyl", "source", "file_segment", "confidence",
 ]
 
 
@@ -476,7 +485,7 @@ def save_csv(rows: List[Dict], csv_path: str) -> None:
 
 
 # ──────────────────────────────────────────────────
-#  Fonction principale (callable par le web)
+#  Fonction principale
 # ──────────────────────────────────────────────────
 
 async def run_analysis(
@@ -496,7 +505,7 @@ async def run_analysis(
     on_progress("download", 15, "Telechargement termine.")
 
     on_progress("cutting", 18, "Decoupage en segments...")
-    await cut_segments(mp3file, segments_dir)
+    await cut_segments(mp3file, segments_dir, on_progress)
     on_progress("cutting", 25, "Decoupage termine.")
 
     all_segs = list_all_segments(segments_dir)
@@ -505,48 +514,24 @@ async def run_analysis(
         on_progress("error", 100, "Aucun segment selectionne.")
         return [], csv_path
 
-    audd_token = os.environ.get("AUDD_API_TOKEN", "").strip() or None
-    acr_config = None
-    acr_host = os.environ.get("ACRCLOUD_HOST", "").strip()
-    acr_key = os.environ.get("ACRCLOUD_ACCESS_KEY", "").strip()
-    acr_secret = os.environ.get("ACRCLOUD_ACCESS_SECRET", "").strip()
-    if acr_host and acr_key and acr_secret:
-        acr_config = {"host": acr_host, "access_key": acr_key, "access_secret": acr_secret}
-
-    services = ["Shazam"]
-    if audd_token:
-        services.append("AudD")
-    if acr_config:
-        services.append("ACRCloud")
     on_progress("recognition", 25,
-                f"Reconnaissance via {', '.join(services)} ({len(selected)} segments)...")
+                f"Reconnaissance Shazam ({len(selected)} segments, ~{len(selected) * 2}s)...")
+    log.info("=== ETAPE 3/5 : Reconnaissance (%d segments) ===", len(selected))
 
-    shazam = Shazam()
-    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    # Traitement sequentiel avec cooldown (evite le rate-limit)
+    all_results = await process_segments_sequential(selected, segments_dir, on_progress)
 
-    all_results: List[Dict[str, Any]] = []
-    done_count = 0
-    total = len(selected)
+    log.info("Resultats bruts : %d matches sur %d segments", len(all_results), len(selected))
 
-    tasks = [
-        process_segment(fn, segments_dir, shazam, sem, audd_token, acr_config)
-        for fn in selected
-    ]
-
-    for fut in asyncio.as_completed(tasks):
-        candidates = await fut
-        best = pick_best_per_segment(candidates)
-        if best:
-            all_results.append(best)
-            log.info("  Match : %s - %s", best["artist"], best["title"])
-        done_count += 1
-        pct = 25 + int((done_count / total) * 65)
-        on_progress("recognition", pct,
-                    f"Segment {done_count}/{total} analyse"
-                    + (f" — {best['artist']} - {best['title']}" if best else ""))
-
-    on_progress("finalize", 92, "Deduplication...")
+    # Dedup
+    on_progress("finalize", 80, "Deduplication...")
     tracklist = deduplicate_tracklist(all_results)
+
+    # Enrichissement Discogs + YouTube
+    tracklist = await enrich_tracklist(tracklist, on_progress)
+
+    # Export
+    on_progress("finalize", 92, "Sauvegarde CSV...")
     save_csv(tracklist, csv_path)
     on_progress("done", 100, f"Termine ! {len(tracklist)} tracks identifiees.")
 
@@ -567,8 +552,9 @@ async def main():
 
     log.info("=" * 60)
     for i, r in enumerate(tracklist, 1):
-        log.info("  %2d. [%s] %s - %s (%s)",
-                 i, r["time_offset_hhmmss"], r["artist"], r["title"], r["source"])
+        vinyl = " [VINYL]" if r.get("discogs_vinyl") else ""
+        log.info("  %2d. [%s] %s - %s%s", i, r["time_offset_hhmmss"],
+                 r["artist"], r["title"], vinyl)
     log.info("=" * 60)
 
 
