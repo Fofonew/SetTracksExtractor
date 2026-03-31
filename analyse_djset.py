@@ -289,6 +289,7 @@ def normalize_shazam(file_name: str, payload: Optional[Dict],
     timeskew  = match.get("timeskew", 0)
     freqskew  = match.get("frequencyskew", 0)
 
+    log.info("  Match object complet : %s", json.dumps(match, default=str))
     log.info("  Score brut Shazam : score=%s timeskew=%s freqskew=%s",
              raw_score, timeskew, freqskew)
 
