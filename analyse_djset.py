@@ -285,17 +285,22 @@ def normalize_shazam(file_name: str, payload: Optional[Dict],
                     elif ptype.startswith("apple"):
                         apple = a["uri"]
     match = safe_get(payload, ["matches", 0], {})
-    raw_score     = match.get("score")
-    timeskew      = match.get("timeskew", 0)      # proche de 0 = bon alignement
-    freqskew      = match.get("frequencyskew", 0) # proche de 0 = bon alignement
+    raw_score = match.get("score")
+    timeskew  = match.get("timeskew", 0)
+    freqskew  = match.get("frequencyskew", 0)
+
+    log.info("  Score brut Shazam : score=%s timeskew=%s freqskew=%s",
+             raw_score, timeskew, freqskew)
 
     # Normalisation du score sur 0-100
+    # Shazam retourne un float : si <= 1 c'est une proba (0-1), sinon echelle large
     confidence = None
     if isinstance(raw_score, (int, float)):
-        # Score brut Shazam non documente, empiriquement ~0-1500
-        # On cap a 100 apres division par 15
-        confidence = min(100, round(raw_score / 15))
-        # Penalite si timeskew ou freqskew eleves (mauvais alignement = match douteux)
+        if raw_score <= 1.0:
+            confidence = round(raw_score * 100)
+        else:
+            confidence = min(100, round(raw_score / 15))
+        # Penalite skew
         skew_penalty = min(20, int(abs(timeskew or 0) * 10 + abs(freqskew or 0) * 10))
         confidence = max(0, confidence - skew_penalty)
 
