@@ -27,12 +27,7 @@ MAX_CONCURRENCY  = 2     # 2 requetes Shazam en parallele
 SHAZAM_TIMEOUT   = 20    # timeout par requete en secondes
 SHAZAM_DELAY     = 0.8   # pause apres chaque requete (evite le rate-limit)
 AUDIO_EXT        = ".mp3"
-SIMILARITY_THRESHOLD  = 0.75
-# Score Shazam : en dessous de ce seuil la track est marquee "incertaine"
-# Le score brut Shazam est generalement entre 0 et ~1500 (non documente)
-# On normalise sur 100 en divisant par 15 avec un cap a 100
-CONFIDENCE_LOW    = 30   # en dessous : incertain (rouge)
-CONFIDENCE_MEDIUM = 60   # en dessous : moyen (jaune), au dessus : bon (vert)
+SIMILARITY_THRESHOLD = 0.75
 DISCOGS_USER_AGENT   = "SetTracksExtractor/1.0"
 # ==================================================
 
@@ -284,39 +279,29 @@ def normalize_shazam(file_name: str, payload: Optional[Dict],
                         spotify = a["uri"]
                     elif ptype.startswith("apple"):
                         apple = a["uri"]
-    match = safe_get(payload, ["matches", 0], {})
-    raw_score = match.get("score")
-    timeskew  = match.get("timeskew", 0)
-    freqskew  = match.get("frequencyskew", 0)
+    # Nombre de matches : 1 = trouve, 2+ = tres confiant
+    nb_matches = len(payload.get("matches", []))
 
-    log.info("  Match object complet : %s", json.dumps(match, default=str))
-    log.info("  Score brut Shazam : score=%s timeskew=%s freqskew=%s",
-             raw_score, timeskew, freqskew)
+    # Extraction album + label depuis sections
+    album, label = None, None
+    for section in safe_get(payload, ["track", "sections"], []):
+        if section.get("type") == "SONG":
+            for meta in section.get("metadata", []):
+                t = meta.get("title", "").lower()
+                if t == "album":
+                    album = meta.get("text")
+                elif t == "label":
+                    label = meta.get("text")
 
-    # Normalisation du score sur 0-100
-    # Shazam retourne un float : si <= 1 c'est une proba (0-1), sinon echelle large
-    confidence = None
-    if isinstance(raw_score, (int, float)):
-        if raw_score <= 1.0:
-            confidence = round(raw_score * 100)
-        else:
-            confidence = min(100, round(raw_score / 15))
-        # Penalite skew
-        skew_penalty = min(20, int(abs(timeskew or 0) * 10 + abs(freqskew or 0) * 10))
-        confidence = max(0, confidence - skew_penalty)
-
-    uncertain = confidence is not None and confidence < CONFIDENCE_LOW
-
-    if uncertain:
-        log.warning("  Match incertain (score=%s, timeskew=%s, freqskew=%s) : %s - %s",
-                    raw_score, timeskew, freqskew, title, artist)
+    log.info("  Shazam matches=%d album=%s label=%s", nb_matches, album, label)
 
     return {
         "source": "Shazam", "title": title, "artist": artist,
-        "album": None, "label": None, "isrc": isrc,
+        "album": album, "label": label, "isrc": isrc,
         "spotify": spotify, "apple": apple,
-        "confidence": confidence,
-        "uncertain": uncertain,
+        "nb_matches": nb_matches,
+        "confidence": None,
+        "uncertain": False,
         "file_segment": file_name,
         "time_offset_seconds": offset,
         "time_offset_hhmmss": seconds_to_hhmmss(offset),
@@ -473,7 +458,7 @@ def deduplicate_tracklist(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 FIELDS = [
     "time_offset_hhmmss", "time_offset_seconds", "title", "artist",
     "album", "label", "isrc", "spotify", "apple", "youtube",
-    "discogs_vinyl", "source", "file_segment", "confidence", "uncertain",
+    "discogs_vinyl", "source", "file_segment", "nb_matches",
 ]
 
 

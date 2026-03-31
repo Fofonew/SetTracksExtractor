@@ -150,20 +150,12 @@
         .link-discogs { background: #2a1a3a; color: #c55bff; }
         .link-apple   { background: #3a1a2a; color: #ff6b9d; }
 
-        .conf-badge {
-            display: inline-block; padding: 2px 7px; border-radius: 4px;
-            font-size: .75rem; font-weight: 700;
+        .match-badge {
+            font-size: .9rem;
+            letter-spacing: -2px;
         }
-        .conf-high   { background: #1a3a1a; color: #5bff8a; }
-        .conf-medium { background: #3a2e1a; color: #ffc55b; }
-        .conf-low    { background: #3a1a1a; color: #ff6b6b; }
-
-        tr.uncertain td { opacity: .75; }
-        tr.uncertain td:nth-child(4)::after {
-            content: ' ⚠';
-            color: #ffc55b;
-            font-size: .8rem;
-        }
+        .match-1 { color: #5bff8a; }
+        .match-2 { color: #00ffcc; }
     </style>
 </head>
 <body>
@@ -217,7 +209,7 @@
                         <th>Artiste</th>
                         <th>Titre</th>
                         <th>Album</th>
-                        <th>Score</th>
+                        <th>Match</th>
                         <th>Source</th>
                         <th>Liens</th>
                     </tr>
@@ -371,23 +363,22 @@
                 ? '<span class="vinyl-badge">VINYL</span>'
                 : '';
 
-            // Badge de confiance
-            let confBadge = '-';
-            if (t.confidence !== null && t.confidence !== undefined) {
-                const c = t.confidence;
-                const cls = c >= 60 ? 'conf-high' : c >= 30 ? 'conf-medium' : 'conf-low';
-                confBadge = `<span class="conf-badge ${cls}">${c}%</span>`;
+            // Badge nb_matches
+            let matchBadge = '-';
+            if (t.nb_matches >= 2) {
+                matchBadge = '<span class="match-badge match-2" title="Plusieurs segments concordants">✓✓</span>';
+            } else if (t.nb_matches === 1) {
+                matchBadge = '<span class="match-badge match-1" title="1 segment concordant">✓</span>';
             }
 
             const tr = document.createElement('tr');
-            if (t.uncertain) tr.classList.add('uncertain');
             tr.innerHTML =
                 '<td>' + (i + 1) + '</td>' +
                 '<td>' + (t.time_offset_hhmmss || '') + '</td>' +
                 '<td>' + escHtml(t.artist || '') + '</td>' +
                 '<td>' + escHtml(t.title || '') + vinylBadge + '</td>' +
                 '<td>' + escHtml(t.album || '') + '</td>' +
-                '<td>' + confBadge + '</td>' +
+                '<td>' + matchBadge + '</td>' +
                 '<td><span class="tag tag-' + (t.source || '').toLowerCase().replace(/[^a-z]/g,'') + '">'
                     + escHtml(t.source || '') + '</span></td>' +
                 '<td><div class="links-cell">' + (links.join('') || '-') + '</div></td>';
