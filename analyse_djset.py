@@ -9,7 +9,6 @@ import subprocess
 import hashlib
 import base64
 import hmac
-import uuid
 import urllib.parse
 from datetime import timedelta
 from typing import List, Dict, Any, Optional, Tuple, Callable
@@ -23,13 +22,13 @@ load_dotenv()
 
 # ===================== CONFIG =====================
 SEGMENT_DURATION = 30
-SKIP_INTERVAL = 120          # toutes les 2 min (au lieu de 1) -> 2x moins de requetes
-MAX_CONCURRENCY = 2          # 2 en parallele max (plus doux pour Shazam)
-SHAZAM_TIMEOUT = 20          # timeout par requete Shazam en secondes
-SHAZAM_COOLDOWN = 1.0        # pause entre chaque segment pour eviter le rate-limit
-AUDIO_EXT = ".mp3"
+SKIP_INTERVAL    = 60    # analyse toutes les minutes → ~106 segments pour 1h45
+MAX_CONCURRENCY  = 2     # 2 requetes Shazam en parallele
+SHAZAM_TIMEOUT   = 20    # timeout par requete en secondes
+SHAZAM_DELAY     = 0.8   # pause apres chaque requete (evite le rate-limit)
+AUDIO_EXT        = ".mp3"
 SIMILARITY_THRESHOLD = 0.75
-DISCOGS_USER_AGENT = "SetTracksExtractor/1.0"
+DISCOGS_USER_AGENT   = "SetTracksExtractor/1.0"
 # ==================================================
 
 logging.basicConfig(
@@ -94,29 +93,6 @@ def _noop_progress(step: str, pct: int, msg: str) -> None:
 
 
 # ──────────────────────────────────────────────────
-#  Async subprocess helper
-# ──────────────────────────────────────────────────
-
-async def run_cmd(*args: str, check: bool = True, capture: bool = False) -> Optional[str]:
-    if capture:
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if check and proc.returncode != 0:
-            raise RuntimeError(f"Commande echouee: {' '.join(args)}\n{stderr.decode()}")
-        return stdout.decode().strip()
-    else:
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        if check and proc.returncode != 0:
-            raise RuntimeError(f"Commande echouee: {' '.join(args)}")
-        return None
-
-
-# ──────────────────────────────────────────────────
 #  Nettoyage
 # ──────────────────────────────────────────────────
 
@@ -127,16 +103,14 @@ def cleanup_previous_files(work_dir: str, segments_dir: str) -> None:
     if mp3_files:
         log.info("Nettoyage : %d ancien(s) MP3 supprime(s)", len(mp3_files))
     if os.path.isdir(segments_dir):
-        count = 0
-        for f in os.listdir(segments_dir):
-            os.remove(os.path.join(segments_dir, f))
-            count += 1
+        count = sum(1 for f in os.listdir(segments_dir)
+                    if os.remove(os.path.join(segments_dir, f)) is None)
         if count:
-            log.info("Nettoyage : %d ancien(s) segment(s) supprime(s)", count)
+            log.info("Nettoyage : %d segment(s) supprime(s)", count)
 
 
 # ──────────────────────────────────────────────────
-#  Telechargement (async)
+#  Telechargement
 # ──────────────────────────────────────────────────
 
 async def download_soundcloud(url: str, work_dir: str) -> str:
@@ -146,7 +120,8 @@ async def download_soundcloud(url: str, work_dir: str) -> str:
 
     proc = await asyncio.create_subprocess_exec(
         "scdl", "-l", url, "--onlymp3", "--path", work_dir,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     await proc.wait()
     if proc.returncode != 0:
@@ -154,29 +129,26 @@ async def download_soundcloud(url: str, work_dir: str) -> str:
 
     after = {f for f in os.listdir(work_dir) if f.endswith(".mp3")}
     new_files = after - before
-    if new_files:
-        latest = max(new_files, key=lambda f: os.path.getmtime(os.path.join(work_dir, f)))
-    else:
-        candidates = list(after)
-        if not candidates:
-            raise FileNotFoundError("Aucun MP3 telecharge.")
-        latest = max(candidates, key=lambda f: os.path.getmtime(os.path.join(work_dir, f)))
-
+    candidates = list(new_files) if new_files else list(after)
+    if not candidates:
+        raise FileNotFoundError("Aucun MP3 telecharge.")
+    latest = max(candidates, key=lambda f: os.path.getmtime(os.path.join(work_dir, f)))
     log.info("Fichier : %s", latest)
     return os.path.join(work_dir, latest)
 
 
 # ──────────────────────────────────────────────────
-#  Decoupage (async) avec progress
+#  Decoupage avec progression ffmpeg
 # ──────────────────────────────────────────────────
 
 async def get_audio_duration(filename: str) -> float:
-    output = await run_cmd(
+    proc = await asyncio.create_subprocess_exec(
         "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", filename,
-        capture=True,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    return float(output)
+    stdout, _ = await proc.communicate()
+    return float(stdout.decode().strip())
 
 
 async def cut_segments(filename: str, segments_dir: str,
@@ -184,15 +156,17 @@ async def cut_segments(filename: str, segments_dir: str,
     log.info("=== ETAPE 2/5 : Decoupage ===")
     duration = await get_audio_duration(filename)
     log.info("Duree totale : %s", seconds_to_hhmmss(int(duration)))
-    expected = int(duration / SEGMENT_DURATION) + 1
-    on_progress("cutting", 18, f"Decoupage de {seconds_to_hhmmss(int(duration))} "
-                f"en ~{expected} segments...")
+
+    n_total = int(duration / SEGMENT_DURATION) + 1
+    n_selected = max(1, int(duration / SKIP_INTERVAL)) + 1
+    on_progress("cutting", 18,
+                f"Decoupage de {seconds_to_hhmmss(int(duration))} → "
+                f"~{n_total} segments, {n_selected} a analyser...")
 
     os.makedirs(segments_dir, exist_ok=True)
     for f in os.listdir(segments_dir):
         os.remove(os.path.join(segments_dir, f))
 
-    # Lance ffmpeg avec stderr pour suivre la progression
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", filename,
         "-f", "segment",
@@ -203,7 +177,7 @@ async def cut_segments(filename: str, segments_dir: str,
         stderr=asyncio.subprocess.PIPE,
     )
 
-    # Lit stderr en temps reel pour envoyer la progression
+    # Lit la progression depuis stderr de ffmpeg
     last_pct = 18
     while True:
         line = await proc.stderr.readline()
@@ -213,20 +187,20 @@ async def cut_segments(filename: str, segments_dir: str,
         if "time=" in text:
             try:
                 t = text.split("time=")[1].split()[0]
-                parts = t.split(":")
-                secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                pct = 18 + int((secs / duration) * 7)  # 18-25%
+                h, m, s = t.split(":")
+                secs = int(h) * 3600 + int(m) * 60 + float(s)
+                pct = 18 + int((secs / duration) * 7)
                 if pct > last_pct:
                     last_pct = pct
                     on_progress("cutting", pct,
-                                f"Decoupage... {seconds_to_hhmmss(int(secs))} / "
-                                f"{seconds_to_hhmmss(int(duration))}")
-            except (IndexError, ValueError):
+                                f"Decoupage {seconds_to_hhmmss(int(secs))} "
+                                f"/ {seconds_to_hhmmss(int(duration))}...")
+            except Exception:
                 pass
 
     await proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError("ffmpeg echoue")
+        raise RuntimeError("ffmpeg a echoue")
 
     total = len([f for f in os.listdir(segments_dir) if f.endswith(AUDIO_EXT)])
     log.info("Segments crees : %d", total)
@@ -242,30 +216,34 @@ def select_sparse_segments(files: List[str]) -> List[str]:
         return []
     step = max(1, int(SKIP_INTERVAL / SEGMENT_DURATION))
     selected = files[::step]
-    log.info("Segments selectionnes : %d / %d", len(selected), len(files))
+    log.info("Segments selectionnes : %d / %d (1 tous les %d)", len(selected), len(files), step)
     return selected
 
 
 # ──────────────────────────────────────────────────
-#  Shazam avec timeout
+#  Shazam avec timeout + delay
 # ──────────────────────────────────────────────────
 
-async def shazam_recognize(shazam: Shazam, path: str, retries: int = 2) -> Optional[Dict]:
-    for attempt in range(retries):
-        try:
-            result = await asyncio.wait_for(
-                shazam.recognize(path),
-                timeout=SHAZAM_TIMEOUT,
-            )
-            return result
-        except asyncio.TimeoutError:
-            log.warning("Shazam timeout (%ds) tentative %d/%d",
-                        SHAZAM_TIMEOUT, attempt + 1, retries)
-        except Exception as e:
-            log.warning("Shazam %d/%d : %s", attempt + 1, retries, e)
-        if attempt < retries - 1:
-            await asyncio.sleep(2)
-    return None
+async def shazam_recognize(shazam: Shazam, path: str, sem: asyncio.Semaphore,
+                           retries: int = 2) -> Optional[Dict]:
+    async with sem:
+        for attempt in range(retries):
+            try:
+                result = await asyncio.wait_for(
+                    shazam.recognize(path),
+                    timeout=SHAZAM_TIMEOUT,
+                )
+                # Pause apres chaque requete pour eviter le rate-limit
+                await asyncio.sleep(SHAZAM_DELAY)
+                return result
+            except asyncio.TimeoutError:
+                log.warning("Shazam timeout (%ds) tentative %d/%d — segment ignoré",
+                            SHAZAM_TIMEOUT, attempt + 1, retries)
+            except Exception as e:
+                log.warning("Shazam erreur %d/%d : %s", attempt + 1, retries, e)
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        return None
 
 
 # ──────────────────────────────────────────────────
@@ -302,145 +280,126 @@ def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[s
         "file_segment": file_name,
         "time_offset_seconds": offset,
         "time_offset_hhmmss": seconds_to_hhmmss(offset),
+        "youtube": None, "discogs_vinyl": None,
     }
 
 
 # ──────────────────────────────────────────────────
-#  Traitement sequentiel avec cooldown
+#  Traitement concurrent des segments
 # ──────────────────────────────────────────────────
 
-async def process_segments_sequential(
+async def process_segment(
+    file_name: str, segments_dir: str,
+    shazam: Shazam, sem: asyncio.Semaphore,
+) -> Optional[Dict[str, Any]]:
+    path = os.path.join(segments_dir, file_name)
+    payload = await shazam_recognize(shazam, path, sem)
+    return normalize_shazam(file_name, payload)
+
+
+async def recognize_all(
     selected: List[str], segments_dir: str,
     on_progress: ProgressCallback,
 ) -> List[Dict[str, Any]]:
-    """Traite les segments un par un avec cooldown pour eviter le rate-limit."""
+    log.info("=== ETAPE 3/5 : Reconnaissance Shazam (%d segments) ===", len(selected))
     shazam = Shazam()
-    all_results: List[Dict[str, Any]] = []
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
     total = len(selected)
+    all_results: List[Dict[str, Any]] = []
+    done = 0
+    matched = 0
 
-    for i, file_name in enumerate(selected):
-        path = os.path.join(segments_dir, file_name)
-        idx = segment_index_from_name(file_name)
-        offset = idx * SEGMENT_DURATION
-        ts = seconds_to_hhmmss(offset)
+    tasks = {
+        asyncio.ensure_future(process_segment(fn, segments_dir, shazam, sem)): fn
+        for fn in selected
+    }
 
-        on_progress("recognition", 25 + int((i / total) * 55),
-                    f"Analyse segment {i + 1}/{total} (position {ts})...")
-        log.info("[%d/%d] Segment %s (position %s)", i + 1, total, file_name, ts)
-
-        result = await shazam_recognize(shazam, path)
-        res = normalize_shazam(file_name, result)
-
+    for fut in asyncio.as_completed(tasks.keys()):
+        res = await fut
+        done += 1
         if res:
-            log.info("  -> %s - %s", res["artist"], res["title"])
+            matched += 1
             all_results.append(res)
+            log.info("  [%d/%d] Match : %s - %s", done, total, res["artist"], res["title"])
         else:
-            log.info("  -> pas de match")
+            log.info("  [%d/%d] Pas de match", done, total)
 
-        # Cooldown entre chaque requete
-        if i < total - 1:
-            await asyncio.sleep(SHAZAM_COOLDOWN)
+        pct = 25 + int((done / total) * 50)
+        msg = f"Reconnaissance {done}/{total}"
+        if res:
+            msg += f" — {res['artist']} - {res['title']}"
+        on_progress("recognition", pct, msg)
 
+    log.info("%d matches sur %d segments", matched, total)
     return all_results
 
 
 # ──────────────────────────────────────────────────
-#  Discogs + YouTube enrichment
+#  Discogs + YouTube
 # ──────────────────────────────────────────────────
 
 def search_discogs_vinyl(artist: str, title: str) -> Optional[str]:
-    """Cherche un vinyl sur Discogs. Retourne l'URL si trouve."""
     try:
-        query = f"{artist} {title}"
         r = requests.get(
             "https://api.discogs.com/database/search",
-            params={"q": query, "type": "release", "format": "Vinyl", "per_page": 1},
+            params={"q": f"{artist} {title}", "type": "release",
+                    "format": "Vinyl", "per_page": 1},
             headers={"User-Agent": DISCOGS_USER_AGENT},
             timeout=10,
         )
         if r.status_code == 200:
-            data = r.json()
-            results = data.get("results", [])
+            results = r.json().get("results", [])
             if results:
-                return results[0].get("uri", "").replace("//api.discogs.com", "//www.discogs.com")
+                uri = results[0].get("uri", "")
+                return uri.replace("api.discogs.com", "www.discogs.com")
         return None
     except Exception as e:
-        log.debug("Discogs erreur pour %s - %s: %s", artist, title, e)
+        log.debug("Discogs erreur : %s", e)
         return None
 
 
 def youtube_search_url(artist: str, title: str) -> str:
-    """Construit un lien de recherche YouTube."""
-    query = f"{artist} {title}"
-    return f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
+    return ("https://www.youtube.com/results?search_query="
+            + urllib.parse.quote_plus(f"{artist} {title}"))
 
 
 async def enrich_tracklist(
     tracklist: List[Dict[str, Any]],
     on_progress: ProgressCallback,
 ) -> List[Dict[str, Any]]:
-    """Enrichit chaque track avec Discogs (vinyl) et YouTube."""
-    total = len(tracklist)
-    if not total:
+    if not tracklist:
         return tracklist
 
-    on_progress("enrichment", 82, f"Recherche Discogs/YouTube pour {total} tracks...")
     log.info("=== ETAPE 4/5 : Enrichissement Discogs + YouTube ===")
-
+    total = len(tracklist)
     loop = asyncio.get_event_loop()
 
     for i, track in enumerate(tracklist):
         artist = track.get("artist", "")
         title = track.get("title", "")
-        log.info("  [%d/%d] %s - %s", i + 1, total, artist, title)
+        pct = 78 + int(((i + 1) / total) * 10)
+        on_progress("enrichment", pct,
+                    f"Discogs/YouTube {i + 1}/{total} — {artist} - {title}...")
 
-        # YouTube (instantane, juste un lien)
         track["youtube"] = youtube_search_url(artist, title)
-
-        # Discogs (requete API, dans un executor pour ne pas bloquer)
         discogs_url = await loop.run_in_executor(None, search_discogs_vinyl, artist, title)
         track["discogs_vinyl"] = discogs_url
+
         if discogs_url:
-            log.info("    Vinyl trouve : %s", discogs_url)
+            log.info("  Vinyl : %s - %s => %s", artist, title, discogs_url)
         else:
-            log.info("    Pas de vinyl trouve")
+            log.info("  Pas de vinyl : %s - %s", artist, title)
 
-        pct = 82 + int(((i + 1) / total) * 8)  # 82-90%
-        on_progress("enrichment", pct,
-                    f"Enrichissement {i + 1}/{total} — {artist} - {title}"
-                    + (" (vinyl!)" if discogs_url else ""))
-
-        # Respect rate-limit Discogs (25 req/min)
+        # Respect du rate-limit Discogs (25 req/min)
         if i < total - 1:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
 
     return tracklist
 
 
 # ──────────────────────────────────────────────────
-#  Fusion / dedup
+#  Deduplication
 # ──────────────────────────────────────────────────
-
-def pick_best_per_segment(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    grouped: Dict[Tuple[str, str], List[Dict]] = {}
-    for c in candidates:
-        key = track_key(c["title"], c["artist"])
-        found = False
-        for ek in grouped:
-            if similar(key[0], ek[0]) > SIMILARITY_THRESHOLD and \
-               similar(key[1], ek[1]) > SIMILARITY_THRESHOLD:
-                grouped[ek].append(c)
-                found = True
-                break
-        if not found:
-            grouped[key] = [c]
-    best_group = max(grouped.values(), key=len)
-    return max(best_group, key=lambda c: c.get("confidence") or 0)
-
 
 def deduplicate_tracklist(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not items:
@@ -449,14 +408,11 @@ def deduplicate_tracklist(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     for item in items:
         key = track_key(item["title"], item["artist"])
-        is_dup = False
-        for existing in deduped:
-            ek = track_key(existing["title"], existing["artist"])
-            if similar(key[0], ek[0]) > SIMILARITY_THRESHOLD and \
-               similar(key[1], ek[1]) > SIMILARITY_THRESHOLD:
-                is_dup = True
-                break
-        if not is_dup:
+        if not any(
+            similar(key[0], track_key(e["title"], e["artist"])[0]) > SIMILARITY_THRESHOLD and
+            similar(key[1], track_key(e["title"], e["artist"])[1]) > SIMILARITY_THRESHOLD
+            for e in deduped
+        ):
             deduped.append(item)
     removed = len(items) - len(deduped)
     if removed:
@@ -515,23 +471,18 @@ async def run_analysis(
         return [], csv_path
 
     on_progress("recognition", 25,
-                f"Reconnaissance Shazam ({len(selected)} segments, ~{len(selected) * 2}s)...")
-    log.info("=== ETAPE 3/5 : Reconnaissance (%d segments) ===", len(selected))
+                f"Reconnaissance Shazam sur {len(selected)} segments "
+                f"(~{len(selected) * (SHAZAM_DELAY + 2) // MAX_CONCURRENCY:.0f}s)...")
 
-    # Traitement sequentiel avec cooldown (evite le rate-limit)
-    all_results = await process_segments_sequential(selected, segments_dir, on_progress)
+    all_results = await recognize_all(selected, segments_dir, on_progress)
 
-    log.info("Resultats bruts : %d matches sur %d segments", len(all_results), len(selected))
-
-    # Dedup
-    on_progress("finalize", 80, "Deduplication...")
+    on_progress("dedup", 76, "Deduplication...")
     tracklist = deduplicate_tracklist(all_results)
+    log.info("%d tracks uniques apres dedup", len(tracklist))
 
-    # Enrichissement Discogs + YouTube
     tracklist = await enrich_tracklist(tracklist, on_progress)
 
-    # Export
-    on_progress("finalize", 92, "Sauvegarde CSV...")
+    on_progress("saving", 90, "Sauvegarde CSV...")
     save_csv(tracklist, csv_path)
     on_progress("done", 100, f"Termine ! {len(tracklist)} tracks identifiees.")
 
@@ -547,14 +498,13 @@ async def main():
         log.info("[%3d%%] %s", pct, msg)
 
     url = sys.argv[1].strip() if len(sys.argv) > 1 else input("URL SoundCloud : ").strip()
-    work_dir = os.getcwd()
-    tracklist, csv_path = await run_analysis(url, work_dir, on_progress=cli_progress)
+    tracklist, _ = await run_analysis(url, os.getcwd(), on_progress=cli_progress)
 
     log.info("=" * 60)
     for i, r in enumerate(tracklist, 1):
         vinyl = " [VINYL]" if r.get("discogs_vinyl") else ""
-        log.info("  %2d. [%s] %s - %s%s", i, r["time_offset_hhmmss"],
-                 r["artist"], r["title"], vinyl)
+        log.info("  %2d. [%s] %s - %s%s",
+                 i, r["time_offset_hhmmss"], r["artist"], r["title"], vinyl)
     log.info("=" * 60)
 
 

@@ -15,321 +15,343 @@
             flex-direction: column;
             align-items: center;
         }
-        .container {
-            width: 100%;
-            max-width: 960px;
-            padding: 2rem 1rem;
-        }
-        h1 {
-            text-align: center;
-            font-size: 1.8rem;
-            margin-bottom: .3rem;
-            color: #ff6b35;
-        }
-        .subtitle {
-            text-align: center;
-            color: #888;
-            margin-bottom: 2rem;
-            font-size: .9rem;
-        }
+        .container { width: 100%; max-width: 1100px; padding: 2rem 1rem; }
+        h1 { text-align: center; font-size: 1.8rem; margin-bottom: .3rem; color: #ff6b35; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 2rem; font-size: .9rem; }
 
-        /* Form */
-        .form-row {
-            display: flex;
-            gap: .5rem;
-            margin-bottom: 1.5rem;
-        }
+        .form-row { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
         input[type="text"] {
-            flex: 1;
-            padding: .75rem 1rem;
-            border: 1px solid #333;
-            border-radius: 8px;
-            background: #1a1a1a;
-            color: #e0e0e0;
-            font-size: 1rem;
-            outline: none;
-            transition: border-color .2s;
+            flex: 1; padding: .75rem 1rem;
+            border: 1px solid #333; border-radius: 8px;
+            background: #1a1a1a; color: #e0e0e0; font-size: 1rem;
+            outline: none; transition: border-color .2s;
         }
         input[type="text"]:focus { border-color: #ff6b35; }
         input[type="text"]::placeholder { color: #555; }
         button {
-            padding: .75rem 1.5rem;
-            border: none;
-            border-radius: 8px;
-            background: #ff6b35;
-            color: #fff;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background .2s;
-            white-space: nowrap;
+            padding: .75rem 1.5rem; border: none; border-radius: 8px;
+            background: #ff6b35; color: #fff; font-size: 1rem;
+            font-weight: 600; cursor: pointer; transition: background .2s; white-space: nowrap;
         }
         button:hover { background: #e55a25; }
         button:disabled { background: #555; cursor: not-allowed; }
 
         /* Progress */
-        .progress-section {
-            display: none;
-            margin-bottom: 1.5rem;
-        }
+        .progress-section { display: none; margin-bottom: 1.5rem; }
         .progress-section.active { display: block; }
+
         .progress-bar-bg {
-            width: 100%;
-            height: 28px;
-            background: #1a1a1a;
-            border-radius: 14px;
-            overflow: hidden;
-            margin-bottom: .5rem;
-            border: 1px solid #333;
+            width: 100%; height: 30px; background: #1a1a1a;
+            border-radius: 15px; overflow: hidden;
+            margin-bottom: .5rem; border: 1px solid #333; position: relative;
         }
         .progress-bar-fill {
             height: 100%;
             background: linear-gradient(90deg, #ff6b35, #ff9b6b);
-            border-radius: 14px;
-            width: 0%;
-            transition: width .4s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: .8rem;
-            font-weight: 600;
-            color: #fff;
-            min-width: 40px;
+            border-radius: 15px; width: 0%;
+            transition: width .5s ease;
+            display: flex; align-items: center; justify-content: center;
+            font-size: .8rem; font-weight: 600; color: #fff; min-width: 42px;
+            position: relative; overflow: hidden;
         }
-        .progress-msg {
-            color: #aaa;
-            font-size: .85rem;
+        /* Rayures animees quand en attente */
+        .progress-bar-fill.pulsing::after {
+            content: '';
+            position: absolute; top: 0; left: -100%; width: 60%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+            animation: shimmer 1.4s infinite;
+        }
+        @keyframes shimmer {
+            0%   { left: -60%; }
+            100% { left: 160%; }
+        }
+
+        .progress-footer {
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .progress-msg { color: #aaa; font-size: .85rem; flex: 1; }
+        .elapsed { color: #666; font-size: .8rem; white-space: nowrap; margin-left: 1rem; }
+
+        /* Status dot */
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+            background: #ff6b35; margin-right: 6px;
+            animation: blink 1.2s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; } 50% { opacity: .2; }
         }
 
         /* Error */
         .error-box {
-            display: none;
-            background: #3a1111;
-            border: 1px solid #ff4444;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-bottom: 1rem;
-            color: #ff8888;
+            display: none; background: #3a1111;
+            border: 1px solid #ff4444; border-radius: 8px;
+            padding: 1rem; margin-bottom: 1rem; color: #ff8888;
         }
         .error-box.active { display: block; }
 
         /* Results */
-        .results-section {
-            display: none;
-            margin-top: 1rem;
-        }
+        .results-section { display: none; margin-top: 1rem; }
         .results-section.active { display: block; }
         .results-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
+            display: flex; justify-content: space-between;
+            align-items: center; margin-bottom: 1rem;
         }
         .results-header h2 { font-size: 1.2rem; color: #ff6b35; }
         .dl-btn {
-            padding: .5rem 1rem;
-            font-size: .85rem;
-            background: #2a2a2a;
-            border: 1px solid #ff6b35;
-            color: #ff6b35;
+            padding: .5rem 1rem; font-size: .85rem;
+            background: #2a2a2a; border: 1px solid #ff6b35; color: #ff6b35;
         }
         .dl-btn:hover { background: #ff6b35; color: #fff; }
 
-        /* Table */
-        .table-wrap {
-            overflow-x: auto;
-            border-radius: 8px;
-            border: 1px solid #333;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: .85rem;
-        }
+        .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #333; }
+        table { width: 100%; border-collapse: collapse; font-size: .85rem; }
         thead { background: #1a1a1a; }
-        th, td {
-            text-align: left;
-            padding: .6rem .8rem;
-            white-space: nowrap;
-        }
-        th {
-            color: #ff6b35;
-            font-weight: 600;
-            border-bottom: 2px solid #333;
-        }
+        th, td { text-align: left; padding: .6rem .8rem; white-space: nowrap; }
+        th { color: #ff6b35; font-weight: 600; border-bottom: 2px solid #333; }
         tr:nth-child(even) { background: #161616; }
         tr:hover { background: #222; }
-        td a {
-            color: #6bc1ff;
-            text-decoration: none;
-        }
+        td a { color: #6bc1ff; text-decoration: none; }
         td a:hover { text-decoration: underline; }
-        .tag {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: .75rem;
-            font-weight: 600;
-        }
+
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
         .tag-shazam { background: #1d3a5c; color: #5badff; }
-        .tag-audd { background: #3a2e1d; color: #ffc55b; }
-        .tag-acrcloud { background: #1d3a2e; color: #5bffba; }
+
+        .vinyl-badge {
+            display: inline-block; padding: 2px 7px; border-radius: 4px;
+            font-size: .72rem; font-weight: 700;
+            background: #2e1d3a; color: #c55bff; margin-left: 4px;
+        }
+
+        .links-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .links-cell a {
+            padding: 2px 8px; border-radius: 4px; font-size: .75rem;
+            text-decoration: none; font-weight: 600;
+        }
+        .link-spotify { background: #1a3a1a; color: #1db954; }
+        .link-youtube { background: #3a1a1a; color: #ff4444; }
+        .link-discogs { background: #2a1a3a; color: #c55bff; }
+        .link-apple   { background: #3a1a2a; color: #ff6b9d; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>SetTracksExtractor</h1>
-        <p class="subtitle">Identifie les tracks d'un DJ set SoundCloud</p>
+<div class="container">
+    <h1>SetTracksExtractor</h1>
+    <p class="subtitle">Identifie les tracks d'un DJ set SoundCloud</p>
 
-        <div class="form-row">
-            <input type="text" id="url-input" placeholder="https://soundcloud.com/..." autofocus>
-            <button id="analyze-btn" onclick="startAnalysis()">Analyser</button>
+    <div class="form-row">
+        <input type="text" id="url-input" placeholder="https://soundcloud.com/..." autofocus>
+        <button id="analyze-btn" onclick="startAnalysis()">Analyser</button>
+    </div>
+
+    <div class="error-box" id="error-box"></div>
+
+    <div class="progress-section" id="progress-section">
+        <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progress-fill">0%</div>
         </div>
-
-        <div class="error-box" id="error-box"></div>
-
-        <div class="progress-section" id="progress-section">
-            <div class="progress-bar-bg">
-                <div class="progress-bar-fill" id="progress-fill">0%</div>
-            </div>
-            <p class="progress-msg" id="progress-msg">Initialisation...</p>
-        </div>
-
-        <div class="results-section" id="results-section">
-            <div class="results-header">
-                <h2 id="results-title">Tracklist</h2>
-                <button class="dl-btn" id="dl-btn" onclick="downloadCSV()">Telecharger CSV</button>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>#</th>
-                            <th>Position</th>
-                            <th>Artiste</th>
-                            <th>Titre</th>
-                            <th>Album</th>
-                            <th>Source</th>
-                            <th>Liens</th>
-                        </tr>
-                    </thead>
-                    <tbody id="results-body"></tbody>
-                </table>
-            </div>
+        <div class="progress-footer">
+            <p class="progress-msg" id="progress-msg">
+                <span class="status-dot"></span>Initialisation...
+            </p>
+            <span class="elapsed" id="elapsed"></span>
         </div>
     </div>
 
-    <script>
-        let currentJobId = null;
+    <div class="results-section" id="results-section">
+        <div class="results-header">
+            <h2 id="results-title">Tracklist</h2>
+            <button class="dl-btn" onclick="downloadCSV()">Telecharger CSV</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Position</th>
+                        <th>Artiste</th>
+                        <th>Titre</th>
+                        <th>Album</th>
+                        <th>Source</th>
+                        <th>Liens</th>
+                    </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
 
-        function startAnalysis() {
-            const url = document.getElementById('url-input').value.trim();
-            if (!url) return;
+<script>
+    let currentJobId = null;
+    let startTime = null;
+    let elapsedTimer = null;
+    let lastProgressPct = 0;
+    let shimmerTimer = null;
 
-            const btn = document.getElementById('analyze-btn');
-            btn.disabled = true;
-            btn.textContent = 'Analyse en cours...';
+    function startAnalysis() {
+        const url = document.getElementById('url-input').value.trim();
+        if (!url) return;
 
-            document.getElementById('error-box').classList.remove('active');
-            document.getElementById('results-section').classList.remove('active');
-            document.getElementById('progress-section').classList.add('active');
-            setProgress(0, 'Connexion...');
+        const btn = document.getElementById('analyze-btn');
+        btn.disabled = true;
+        btn.textContent = 'Analyse en cours...';
 
-            const evtSource = new EventSource('/api/analyze?url=' + encodeURIComponent(url));
+        document.getElementById('error-box').classList.remove('active');
+        document.getElementById('results-section').classList.remove('active');
+        document.getElementById('progress-section').classList.add('active');
+        setProgress(0, 'Connexion au serveur...');
 
-            evtSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
+        // Chrono
+        startTime = Date.now();
+        elapsedTimer = setInterval(updateElapsed, 1000);
 
-                if (data.type === 'progress') {
-                    setProgress(data.pct, data.message);
-                }
-                else if (data.type === 'result') {
-                    currentJobId = data.job_id;
-                    renderResults(data.tracks);
-                    setProgress(100, 'Termine !');
-                    setTimeout(() => {
-                        document.getElementById('progress-section').classList.remove('active');
-                    }, 800);
-                    evtSource.close();
-                    btn.disabled = false;
-                    btn.textContent = 'Analyser';
-                }
-                else if (data.type === 'error') {
-                    showError(data.message);
-                    evtSource.close();
-                    btn.disabled = false;
-                    btn.textContent = 'Analyser';
-                }
-            };
+        const evtSource = new EventSource('/api/analyze?url=' + encodeURIComponent(url));
 
-            evtSource.onerror = function() {
+        evtSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'heartbeat') {
+                // Serveur vivant — on pulse la barre si elle n'a pas bougé
+                setPulsing(true);
+                return;
+            }
+            if (data.type === 'progress') {
+                setProgress(data.pct, data.message);
+            }
+            else if (data.type === 'result') {
+                currentJobId = data.job_id;
+                clearTimers();
+                renderResults(data.tracks);
+                setProgress(100, 'Termine !');
+                setTimeout(() => {
+                    document.getElementById('progress-section').classList.remove('active');
+                }, 1000);
                 evtSource.close();
-                showError("Connexion au serveur perdue.");
                 btn.disabled = false;
                 btn.textContent = 'Analyser';
-            };
-        }
-
-        function setProgress(pct, msg) {
-            const fill = document.getElementById('progress-fill');
-            fill.style.width = pct + '%';
-            fill.textContent = pct + '%';
-            document.getElementById('progress-msg').textContent = msg;
-        }
-
-        function showError(msg) {
-            const box = document.getElementById('error-box');
-            box.textContent = msg;
-            box.classList.add('active');
-            document.getElementById('progress-section').classList.remove('active');
-        }
-
-        function sourceTag(src) {
-            const cls = src.toLowerCase().replace(/[^a-z]/g, '');
-            return `<span class="tag tag-${cls}">${src}</span>`;
-        }
-
-        function renderResults(tracks) {
-            const tbody = document.getElementById('results-body');
-            tbody.innerHTML = '';
-            document.getElementById('results-title').textContent =
-                'Tracklist (' + tracks.length + ' tracks)';
-
-            tracks.forEach((t, i) => {
-                const links = [];
-                if (t.spotify) {
-                    const href = t.spotify.startsWith('http') ? t.spotify
-                        : 'https://open.spotify.com/search/' + encodeURIComponent(t.artist + ' ' + t.title);
-                    links.push('<a href="' + href + '" target="_blank">Spotify</a>');
-                }
-                if (t.apple) {
-                    links.push('<a href="' + t.apple + '" target="_blank">Apple</a>');
-                }
-
-                const tr = document.createElement('tr');
-                tr.innerHTML =
-                    '<td>' + (i + 1) + '</td>' +
-                    '<td>' + (t.time_offset_hhmmss || '') + '</td>' +
-                    '<td>' + (t.artist || '') + '</td>' +
-                    '<td>' + (t.title || '') + '</td>' +
-                    '<td>' + (t.album || '') + '</td>' +
-                    '<td>' + sourceTag(t.source || '') + '</td>' +
-                    '<td>' + (links.join(' ') || '-') + '</td>';
-                tbody.appendChild(tr);
-            });
-
-            document.getElementById('results-section').classList.add('active');
-        }
-
-        function downloadCSV() {
-            if (currentJobId) {
-                window.open('/api/download/' + currentJobId, '_blank');
             }
-        }
+            else if (data.type === 'error') {
+                clearTimers();
+                showError(data.message);
+                evtSource.close();
+                btn.disabled = false;
+                btn.textContent = 'Analyser';
+            }
+        };
 
-        document.getElementById('url-input').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') startAnalysis();
+        evtSource.onerror = function() {
+            evtSource.close();
+            clearTimers();
+            showError("Connexion au serveur perdue. Verifiez que le serveur tourne.");
+            btn.disabled = false;
+            btn.textContent = 'Analyser';
+        };
+    }
+
+    function setProgress(pct, msg) {
+        const fill = document.getElementById('progress-fill');
+        fill.style.width = Math.max(pct, 2) + '%';
+        fill.textContent = pct + '%';
+        document.getElementById('progress-msg').innerHTML =
+            '<span class="status-dot"></span>' + msg;
+        lastProgressPct = pct;
+        // Si la progression avance, on retire le shimmer
+        setPulsing(false);
+    }
+
+    function setPulsing(active) {
+        const fill = document.getElementById('progress-fill');
+        if (active) {
+            fill.classList.add('pulsing');
+        } else {
+            // On remet le shimmer si le prochain heartbeat arrive
+            clearTimeout(shimmerTimer);
+            shimmerTimer = setTimeout(() => fill.classList.remove('pulsing'), 300);
+        }
+    }
+
+    function updateElapsed() {
+        if (!startTime) return;
+        const secs = Math.floor((Date.now() - startTime) / 1000);
+        const m = Math.floor(secs / 60).toString().padStart(2, '0');
+        const s = (secs % 60).toString().padStart(2, '0');
+        document.getElementById('elapsed').textContent = m + ':' + s;
+    }
+
+    function clearTimers() {
+        clearInterval(elapsedTimer);
+        clearTimeout(shimmerTimer);
+    }
+
+    function showError(msg) {
+        const box = document.getElementById('error-box');
+        box.textContent = msg;
+        box.classList.add('active');
+        document.getElementById('progress-section').classList.remove('active');
+    }
+
+    function renderResults(tracks) {
+        const tbody = document.getElementById('results-body');
+        tbody.innerHTML = '';
+        document.getElementById('results-title').textContent =
+            'Tracklist (' + tracks.length + ' tracks)';
+
+        tracks.forEach((t, i) => {
+            const links = [];
+
+            if (t.spotify) {
+                const href = t.spotify.startsWith('http')
+                    ? t.spotify
+                    : 'https://open.spotify.com/search/' + encodeURIComponent((t.artist || '') + ' ' + (t.title || ''));
+                links.push('<a class="link-spotify" href="' + href + '" target="_blank">Spotify</a>');
+            }
+            if (t.youtube) {
+                links.push('<a class="link-youtube" href="' + t.youtube + '" target="_blank">YouTube</a>');
+            }
+            if (t.discogs_vinyl) {
+                links.push('<a class="link-discogs" href="https://www.discogs.com' + t.discogs_vinyl + '" target="_blank">Vinyl</a>');
+            }
+            if (t.apple) {
+                links.push('<a class="link-apple" href="' + t.apple + '" target="_blank">Apple</a>');
+            }
+
+            const vinylBadge = t.discogs_vinyl
+                ? '<span class="vinyl-badge">VINYL</span>'
+                : '';
+
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+                '<td>' + (i + 1) + '</td>' +
+                '<td>' + (t.time_offset_hhmmss || '') + '</td>' +
+                '<td>' + escHtml(t.artist || '') + '</td>' +
+                '<td>' + escHtml(t.title || '') + vinylBadge + '</td>' +
+                '<td>' + escHtml(t.album || '') + '</td>' +
+                '<td><span class="tag tag-' + (t.source || '').toLowerCase().replace(/[^a-z]/g,'') + '">'
+                    + escHtml(t.source || '') + '</span></td>' +
+                '<td><div class="links-cell">' + (links.join('') || '-') + '</div></td>';
+            tbody.appendChild(tr);
         });
-    </script>
+
+        document.getElementById('results-section').classList.add('active');
+    }
+
+    function escHtml(s) {
+        return String(s)
+            .replace(/&/g,'&amp;')
+            .replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;');
+    }
+
+    function downloadCSV() {
+        if (currentJobId) window.open('/api/download/' + currentJobId, '_blank');
+    }
+
+    document.getElementById('url-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') startAnalysis();
+    });
+</script>
 </body>
 </html>

@@ -2,3 +2,5 @@
 .claude
 segments/*
 .idea
+/tracklist.csv
+/tracklist_dual.csv

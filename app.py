@@ -13,9 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from analyse_djset import run_analysis, FIELDS
 
 app = FastAPI(title="SetTracksExtractor")
-
 jobs: dict = {}
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
@@ -37,7 +35,6 @@ async def analyze(url: str) -> StreamingResponse:
         queue: asyncio.Queue = asyncio.Queue()
 
         def on_progress(step: str, pct: int, msg: str) -> None:
-            # thread-safe: peut etre appele depuis sync ou async
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {"type": "progress", "step": step, "pct": pct, "message": msg},
@@ -54,24 +51,35 @@ async def analyze(url: str) -> StreamingResponse:
             finally:
                 queue.put_nowait(None)
 
-        task = asyncio.create_task(run())
+        async def heartbeat():
+            """Envoie un ping toutes les 5s pour signaler que le serveur est vivant."""
+            while True:
+                await asyncio.sleep(5)
+                queue.put_nowait({"type": "heartbeat"})
+
+        # Lance l'analyse et le heartbeat en parallele
+        run_task = asyncio.create_task(run())
+        hb_task = asyncio.create_task(heartbeat())
 
         # Padding initial pour forcer le flush du buffer navigateur
-        yield ": padding\n\n"
+        yield ": padding " + " " * 2048 + "\n\n"
 
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            yield f"data: {json.dumps(item)}\n\n"
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            hb_task.cancel()
 
-        await task
+        await run_task
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Cache-Control": "no-cache, no-store",
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
@@ -83,8 +91,7 @@ async def download_csv(job_id: str):
     job = jobs.get(job_id)
     if not job or not os.path.isfile(job["csv_path"]):
         return {"error": "Job introuvable"}
-    return FileResponse(job["csv_path"], filename="tracklist.csv",
-                        media_type="text/csv")
+    return FileResponse(job["csv_path"], filename="tracklist.csv", media_type="text/csv")
 
 
 @app.on_event("shutdown")
