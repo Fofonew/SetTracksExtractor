@@ -22,12 +22,17 @@ load_dotenv()
 
 # ===================== CONFIG =====================
 SEGMENT_DURATION = 30
-SKIP_INTERVAL    = 60    # analyse toutes les minutes → ~106 segments pour 1h45
+SKIP_INTERVAL    = 0   # analyse toutes les minutes → ~106 segments pour 1h45
 MAX_CONCURRENCY  = 2     # 2 requetes Shazam en parallele
 SHAZAM_TIMEOUT   = 20    # timeout par requete en secondes
 SHAZAM_DELAY     = 0.8   # pause apres chaque requete (evite le rate-limit)
 AUDIO_EXT        = ".mp3"
-SIMILARITY_THRESHOLD = 0.75
+SIMILARITY_THRESHOLD  = 0.75
+# Score Shazam : en dessous de ce seuil la track est marquee "incertaine"
+# Le score brut Shazam est generalement entre 0 et ~1500 (non documente)
+# On normalise sur 100 en divisant par 15 avec un cap a 100
+CONFIDENCE_LOW    = 30   # en dessous : incertain (rouge)
+CONFIDENCE_MEDIUM = 60   # en dessous : moyen (jaune), au dessus : bon (vert)
 DISCOGS_USER_AGENT   = "SetTracksExtractor/1.0"
 # ==================================================
 
@@ -152,13 +157,15 @@ async def get_audio_duration(filename: str) -> float:
 
 
 async def cut_segments(filename: str, segments_dir: str,
-                       on_progress: ProgressCallback = _noop_progress) -> float:
+                       on_progress: ProgressCallback = _noop_progress,
+                       segment_duration: int = SEGMENT_DURATION,
+                       skip_interval: int = SKIP_INTERVAL) -> float:
     log.info("=== ETAPE 2/5 : Decoupage ===")
     duration = await get_audio_duration(filename)
     log.info("Duree totale : %s", seconds_to_hhmmss(int(duration)))
 
-    n_total = int(duration / SEGMENT_DURATION) + 1
-    n_selected = max(1, int(duration / SKIP_INTERVAL)) + 1
+    n_total = int(duration / segment_duration) + 1
+    n_selected = (int(duration / skip_interval) + 1) if skip_interval > 0 else n_total
     on_progress("cutting", 18,
                 f"Decoupage de {seconds_to_hhmmss(int(duration))} → "
                 f"~{n_total} segments, {n_selected} a analyser...")
@@ -170,7 +177,7 @@ async def cut_segments(filename: str, segments_dir: str,
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", filename,
         "-f", "segment",
-        "-segment_time", str(SEGMENT_DURATION),
+        "-segment_time", str(segment_duration),
         "-c:a", "libmp3lame", "-q:a", "2",
         os.path.join(segments_dir, "part_%06d" + AUDIO_EXT),
         stdout=asyncio.subprocess.DEVNULL,
@@ -211,10 +218,15 @@ def list_all_segments(segments_dir: str) -> List[str]:
     return sorted([f for f in os.listdir(segments_dir) if f.endswith(AUDIO_EXT)])
 
 
-def select_sparse_segments(files: List[str]) -> List[str]:
+def select_sparse_segments(files: List[str],
+                           segment_duration: int = SEGMENT_DURATION,
+                           skip_interval: int = SKIP_INTERVAL) -> List[str]:
     if not files:
         return []
-    step = max(1, int(SKIP_INTERVAL / SEGMENT_DURATION))
+    if skip_interval <= 0:
+        log.info("Segments selectionnes : %d / %d (tous)", len(files), len(files))
+        return files
+    step = max(1, int(skip_interval / segment_duration))
     selected = files[::step]
     log.info("Segments selectionnes : %d / %d (1 tous les %d)", len(selected), len(files), step)
     return selected
@@ -250,7 +262,8 @@ async def shazam_recognize(shazam: Shazam, path: str, sem: asyncio.Semaphore,
 #  Normalisation
 # ──────────────────────────────────────────────────
 
-def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[str, Any]]:
+def normalize_shazam(file_name: str, payload: Optional[Dict],
+                     segment_duration: int = SEGMENT_DURATION) -> Optional[Dict[str, Any]]:
     if not payload:
         return None
     title = safe_get(payload, ["track", "title"])
@@ -258,7 +271,7 @@ def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[s
     if not title or not artist:
         return None
     idx = segment_index_from_name(file_name)
-    offset = idx * SEGMENT_DURATION
+    offset = idx * segment_duration
     isrc = safe_get(payload, ["track", "isrc"])
     spotify, apple = None, None
     hub = safe_get(payload, ["track", "hub"], {})
@@ -271,12 +284,33 @@ def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[s
                         spotify = a["uri"]
                     elif ptype.startswith("apple"):
                         apple = a["uri"]
-    score = safe_get(payload, ["matches", 0, "score"])
+    match = safe_get(payload, ["matches", 0], {})
+    raw_score     = match.get("score")
+    timeskew      = match.get("timeskew", 0)      # proche de 0 = bon alignement
+    freqskew      = match.get("frequencyskew", 0) # proche de 0 = bon alignement
+
+    # Normalisation du score sur 0-100
+    confidence = None
+    if isinstance(raw_score, (int, float)):
+        # Score brut Shazam non documente, empiriquement ~0-1500
+        # On cap a 100 apres division par 15
+        confidence = min(100, round(raw_score / 15))
+        # Penalite si timeskew ou freqskew eleves (mauvais alignement = match douteux)
+        skew_penalty = min(20, int(abs(timeskew or 0) * 10 + abs(freqskew or 0) * 10))
+        confidence = max(0, confidence - skew_penalty)
+
+    uncertain = confidence is not None and confidence < CONFIDENCE_LOW
+
+    if uncertain:
+        log.warning("  Match incertain (score=%s, timeskew=%s, freqskew=%s) : %s - %s",
+                    raw_score, timeskew, freqskew, title, artist)
+
     return {
         "source": "Shazam", "title": title, "artist": artist,
         "album": None, "label": None, "isrc": isrc,
         "spotify": spotify, "apple": apple,
-        "confidence": score if isinstance(score, (int, float)) else None,
+        "confidence": confidence,
+        "uncertain": uncertain,
         "file_segment": file_name,
         "time_offset_seconds": offset,
         "time_offset_hhmmss": seconds_to_hhmmss(offset),
@@ -291,15 +325,17 @@ def normalize_shazam(file_name: str, payload: Optional[Dict]) -> Optional[Dict[s
 async def process_segment(
     file_name: str, segments_dir: str,
     shazam: Shazam, sem: asyncio.Semaphore,
+    segment_duration: int = SEGMENT_DURATION,
 ) -> Optional[Dict[str, Any]]:
     path = os.path.join(segments_dir, file_name)
     payload = await shazam_recognize(shazam, path, sem)
-    return normalize_shazam(file_name, payload)
+    return normalize_shazam(file_name, payload, segment_duration)
 
 
 async def recognize_all(
     selected: List[str], segments_dir: str,
     on_progress: ProgressCallback,
+    segment_duration: int = SEGMENT_DURATION,
 ) -> List[Dict[str, Any]]:
     log.info("=== ETAPE 3/5 : Reconnaissance Shazam (%d segments) ===", len(selected))
     shazam = Shazam()
@@ -310,7 +346,9 @@ async def recognize_all(
     matched = 0
 
     tasks = {
-        asyncio.ensure_future(process_segment(fn, segments_dir, shazam, sem)): fn
+        asyncio.ensure_future(
+            process_segment(fn, segments_dir, shazam, sem, segment_duration)
+        ): fn
         for fn in selected
     }
 
@@ -320,7 +358,9 @@ async def recognize_all(
         if res:
             matched += 1
             all_results.append(res)
-            log.info("  [%d/%d] Match : %s - %s", done, total, res["artist"], res["title"])
+            conf = res.get("confidence")
+            conf_str = f" [score={conf}%{'⚠' if res.get('uncertain') else ''}]" if conf is not None else ""
+            log.info("  [%d/%d] Match%s : %s - %s", done, total, conf_str, res["artist"], res["title"])
         else:
             log.info("  [%d/%d] Pas de match", done, total)
 
@@ -427,7 +467,7 @@ def deduplicate_tracklist(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 FIELDS = [
     "time_offset_hhmmss", "time_offset_seconds", "title", "artist",
     "album", "label", "isrc", "spotify", "apple", "youtube",
-    "discogs_vinyl", "source", "file_segment", "confidence",
+    "discogs_vinyl", "source", "file_segment", "confidence", "uncertain",
 ]
 
 
@@ -448,10 +488,14 @@ async def run_analysis(
     url: str,
     work_dir: str,
     on_progress: ProgressCallback = _noop_progress,
+    segment_duration: int = SEGMENT_DURATION,
+    skip_interval: int = SKIP_INTERVAL,
 ) -> Tuple[List[Dict[str, Any]], str]:
     ensure_tools()
     segments_dir = os.path.join(work_dir, "segments")
     csv_path = os.path.join(work_dir, "tracklist.csv")
+
+    log.info("Config : segment=%ds, intervalle=%ds", segment_duration, skip_interval)
 
     on_progress("cleanup", 0, "Nettoyage des fichiers precedents...")
     cleanup_previous_files(work_dir, segments_dir)
@@ -461,11 +505,11 @@ async def run_analysis(
     on_progress("download", 15, "Telechargement termine.")
 
     on_progress("cutting", 18, "Decoupage en segments...")
-    await cut_segments(mp3file, segments_dir, on_progress)
+    await cut_segments(mp3file, segments_dir, on_progress, segment_duration, skip_interval)
     on_progress("cutting", 25, "Decoupage termine.")
 
     all_segs = list_all_segments(segments_dir)
-    selected = select_sparse_segments(all_segs)
+    selected = select_sparse_segments(all_segs, segment_duration, skip_interval)
     if not selected:
         on_progress("error", 100, "Aucun segment selectionne.")
         return [], csv_path
@@ -474,7 +518,7 @@ async def run_analysis(
                 f"Reconnaissance Shazam sur {len(selected)} segments "
                 f"(~{len(selected) * (SHAZAM_DELAY + 2) // MAX_CONCURRENCY:.0f}s)...")
 
-    all_results = await recognize_all(selected, segments_dir, on_progress)
+    all_results = await recognize_all(selected, segments_dir, on_progress, segment_duration)
 
     on_progress("dedup", 76, "Deduplication...")
     tracklist = deduplicate_tracklist(all_results)

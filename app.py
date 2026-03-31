@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from analyse_djset import run_analysis, FIELDS
+from analyse_djset import run_analysis, FIELDS, SEGMENT_DURATION, SKIP_INTERVAL
 
 app = FastAPI(title="SetTracksExtractor")
 jobs: dict = {}
@@ -26,7 +26,11 @@ async def index():
 
 
 @app.get("/api/analyze")
-async def analyze(url: str) -> StreamingResponse:
+async def analyze(
+    url: str,
+    segment_duration: int = SEGMENT_DURATION,
+    skip_interval: int = SKIP_INTERVAL,
+) -> StreamingResponse:
     job_id = str(uuid.uuid4())[:8]
     work_dir = tempfile.mkdtemp(prefix=f"ste_{job_id}_")
     loop = asyncio.get_event_loop()
@@ -42,7 +46,11 @@ async def analyze(url: str) -> StreamingResponse:
 
         async def run():
             try:
-                tracklist, csv_path = await run_analysis(url, work_dir, on_progress=on_progress)
+                tracklist, csv_path = await run_analysis(
+                    url, work_dir, on_progress=on_progress,
+                    segment_duration=segment_duration,
+                    skip_interval=skip_interval,
+                )
                 rows = [{k: r.get(k) for k in FIELDS} for r in tracklist]
                 queue.put_nowait({"type": "result", "job_id": job_id, "tracks": rows})
                 jobs[job_id] = {"csv_path": csv_path, "work_dir": work_dir}
